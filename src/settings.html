@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+		/>
+		<meta
+			http-equiv="X-Content-Security-Policy"
+			content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+		/>
+		<title>Settings</title>
+		<link rel="stylesheet" href="style.css" />
+	</head>
+	<body>
+		<h1>Application Settings</h1>
+
+		<div id="settings-message-area"></div>
+
+		<div class="settings-form">
+			<h2>Admin Email Configuration</h2>
+			<p>
+				Configure the email address and password for sending
+				notifications.
+			</p>
+			<p>
+				<strong>Security Warning:</strong> For services like Gmail, use
+				an "App Password" instead of your main account password. Storing
+				passwords directly is insecure.
+			</p>
+			<p>
+				You also need to configure the correct SMTP Host and Port in
+				<code>src/monitor.js</code>.
+			</p>
+
+			<label for="admin-email">Admin Email:</label>
+			<input
+				type="email"
+				id="admin-email"
+				placeholder="admin@example.com"
+			/>
+
+			<label for="admin-password">Admin Password / App Password:</label>
+			<input type="password" id="admin-password" />
+
+			<button id="save-settings-button">Save Settings</button>
+		</div>
+
+		<script src="settings_renderer.js"></script>
+	</body>
+</html>

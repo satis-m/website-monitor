@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
+		<meta
+			http-equiv="Content-Security-Policy"
+			content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+		/>
+		<meta
+			http-equiv="X-Content-Security-Policy"
+			content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+		/>
+		<title>Website Monitor</title>
+		<link rel="stylesheet" href="style.css" />
+	</head>
+	<body>
+		<h1>Website Monitor</h1>
+
+		<div id="message-area"></div>
+
+		<div class="add-website-form">
+			<h2>Add Website to Monitor</h2>
+			<label for="website-url">Website URL:</label>
+			<input
+				type="text"
+				id="website-url"
+				placeholder="e.g., example.com or https://example.com"
+			/>
+			<button id="add-button">Add Website</button>
+		</div>
+
+		<h2>Monitored Websites</h2>
+		<table id="websites-table">
+			<thead>
+				<tr>
+					<th>URL</th>
+					<th>Status</th>
+					<th>Last Checked</th>
+					<th>Actions</th>
+				</tr>
+			</thead>
+			<tbody>
+				<!-- Website rows will be added here by JavaScript -->
+				<tr>
+					<td colspan="4">Loading websites...</td>
+				</tr>
+			</tbody>
+		</table>
+
+		<script src="renderer.js"></script>
+	</body>
+</html>
