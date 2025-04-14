@@ -1,189 +1,192 @@
 const axios = require('axios');
 const nodemailer = require('nodemailer');
 const db = require('./database');
+const log = require('electron-log'); // Use electron-log
 
 const CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
 let monitorIntervalId = null;
 let isMonitoringPaused = false; // To prevent overlapping runs
 
-// --- Email Sending ---
+// --- Email Sending --- (No changes needed here)
 async function sendNotificationEmail(subject, body) {
-	console.log(`Attempting to send email: ${subject}`);
+	log.info(`Attempting to send email: ${subject}`);
 	try {
 		const adminEmail = await db.getSetting('adminEmail');
 		const adminPassword = await db.getSetting('adminPassword'); // **SECURITY WARNING**
 
 		if (!adminEmail || !adminPassword) {
-			console.warn('Admin email or password not configured. Cannot send notification.');
+			log.warn('Admin email or password not configured. Cannot send notification.');
 			return;
 		}
 
-		// **SECURITY WARNING:** Storing passwords directly is insecure.
-		// For Gmail/GSuite, use "App Passwords".
-		// For other services, check their recommendations (OAuth2 is best).
-		// This example uses basic SMTP auth, which might require enabling "less secure apps"
-		// on some providers (like Gmail, which is phasing this out).
+		// SMTP Configuration (Keep your existing settings)
 		const transporter = nodemailer.createTransport({
-			host: 'smtp.gmail.com', // REPLACE with your SMTP host (e.g., smtp.gmail.com)
-			port: 587, // Or 465 for SSL
-			secure: false, // true for 465, false for other ports (like 587 with STARTTLS)
+			host: 'smtp.example.com', // REPLACE with your SMTP host
+			port: 587,
+			secure: false,
 			auth: {
 				user: adminEmail,
 				pass: adminPassword,
 			},
 			tls: {
-				// Do not fail on invalid certs (useful for some local testing, but less secure)
 				// rejectUnauthorized: false
 			}
 		});
 
 		const mailOptions = {
-			from: `"Website Monitor" <${adminEmail}>`, // sender address
-			to: adminEmail, // list of receivers
-			subject: subject, // Subject line
-			text: body, // plain text body
-			// html: "<b>Hello world?</b>", // html body (optional)
+			from: `"Website Monitor" <${adminEmail}>`,
+			to: adminEmail,
+			subject: subject,
+			text: body,
 		};
 
 		let info = await transporter.sendMail(mailOptions);
-		console.log("Message sent: %s", info.messageId);
+		log.info("Notification email sent: %s", info.messageId);
 
 	} catch (error) {
-		console.error("Error sending notification email:", error);
-		// Consider notifying the user in the app UI that email failed
+		log.error("Error sending notification email:", error);
 	}
 }
 
-// --- Website Checking ---
+// --- Website Checking --- (No changes needed here)
 async function checkWebsite(website) {
 	const url = website.url;
-	console.log(`Checking ${url}...`);
+	log.debug(`Checking ${url}...`); // Use debug for frequent messages
 	let isUp = false;
 	let errorMsg = null;
+	let checkUrl = url;
 
 	try {
-		// Add http:// if missing (basic check)
-		let checkUrl = url;
 		if (!url.startsWith('http://') && !url.startsWith('https://')) {
 			checkUrl = 'http://' + url;
-			console.log(`Prepended http:// to ${url}`);
 		}
 
 		const response = await axios.get(checkUrl, {
-			timeout: 10000, // 10 second timeout
-			validateStatus: function (status) {
-				// Consider any 2xx or 3xx status as "UP"
-				return status >= 200 && status < 400;
-			},
-			// Prevent redirects from being followed automatically if needed
+			timeout: 10000,
+			validateStatus: (status) => status >= 200 && status < 400,
 			maxRedirects: 5,
 		});
-		isUp = true; // If request succeeds without throwing error
-		console.log(`${url} is UP (Status: ${response.status})`);
+		isUp = true;
+		log.debug(`${url} is UP (Status: ${response.status})`);
 
 	} catch (error) {
 		isUp = false;
 		if (error.response) {
-			// The request was made and the server responded with a status code
-			// that falls outside the range of 2xx/3xx
 			errorMsg = `Status ${error.response.status}`;
-			console.warn(`${url} is DOWN (${errorMsg})`);
 		} else if (error.request) {
-			// The request was made but no response was received
 			errorMsg = `No response received`;
-			console.warn(`${url} is DOWN (${errorMsg})`);
 		} else {
-			// Something happened in setting up the request that triggered an Error
 			errorMsg = `Request setup error: ${error.message}`;
-			console.warn(`${url} is DOWN (${errorMsg})`);
 		}
+		log.warn(`${url} appears DOWN (${errorMsg || 'Check failed'})`); // Use warn for actual issues
 	}
 
 	return { isUp, errorMsg };
 }
 
-// --- Monitoring Loop ---
+// --- Monitoring Loop --- ( *** KEY CHANGES HERE *** )
 async function monitorAllWebsites() {
 	if (isMonitoringPaused) {
-		console.log("Monitoring is paused, skipping check cycle.");
+		log.debug("Monitoring is paused, skipping check cycle.");
 		return;
 	}
 
-	console.log("\n--- Starting Monitor Cycle ---");
+	log.info("--- Starting Monitor Cycle ---");
 	isMonitoringPaused = true; // Pause to prevent overlap
+	let databaseWasUpdated = false; // <-- Flag to track if *any* DB write occurred
 
 	try {
 		const websites = await db.getAllWebsites();
 		if (!websites || websites.length === 0) {
-			console.log("No websites configured to monitor.");
+			log.info("No websites configured to monitor.");
+			// Ensure monitoring is unpaused even if no websites
+			isMonitoringPaused = false;
 			return;
 		}
 
-		for (const site of websites) {
-			const { isUp, errorMsg } = await checkWebsite(site);
-			const newStatus = isUp ? 'UP' : 'DOWN';
-			const oldStatus = site.status;
+		// Use Promise.allSettled to check websites somewhat concurrently
+		// and handle individual check failures gracefully.
+		const checkPromises = websites.map(async (site) => {
+			try {
+				const { isUp, errorMsg } = await checkWebsite(site);
+				const newStatus = isUp ? 'UP' : 'DOWN';
+				const oldStatus = site.status;
 
-			if (newStatus !== oldStatus) {
-				console.log(`Status change for ${site.url}: ${oldStatus} -> ${newStatus}`);
-				await db.updateWebsiteStatus(site.id, newStatus); // Update DB first
+				if (newStatus !== oldStatus) {
+					log.info(`Status change for ${site.url}: ${oldStatus} -> ${newStatus}`);
+					// Update DB first
+					await db.updateWebsiteStatus(site.id, newStatus);
+					databaseWasUpdated = true; // Mark that DB was written to
 
-				if (newStatus === 'DOWN') {
-					// Send DOWN notification only when transitioning from UP/UNKNOWN to DOWN
-					if (oldStatus !== 'DOWN') {
+					// Send notifications only on transitions
+					if (newStatus === 'DOWN' && oldStatus !== 'DOWN') {
 						const subject = `ALERT: Website Down - ${site.url}`;
 						const body = `The website ${site.url} appears to be DOWN.\nReason: ${errorMsg || 'Failed check'}\nTimestamp: ${new Date().toISOString()}`;
-						await sendNotificationEmail(subject, body);
-					}
-				} else if (newStatus === 'UP') {
-					// Send UP notification only when transitioning from DOWN to UP
-					if (oldStatus === 'DOWN') {
+						await sendNotificationEmail(subject, body); // Intentionally awaited
+					} else if (newStatus === 'UP' && oldStatus === 'DOWN') {
 						const subject = `RESOLVED: Website Up - ${site.url}`;
 						const body = `The website ${site.url} is back UP.\nTimestamp: ${new Date().toISOString()}`;
-						await sendNotificationEmail(subject, body);
+						await sendNotificationEmail(subject, body); // Intentionally awaited
 					}
+				} else {
+					// Status is the same, just update the last checked time
+					await db.updateWebsiteCheckTime(site.id);
+					databaseWasUpdated = true; // Mark that DB was written to
+					log.debug(`No status change for ${site.url} (Still ${newStatus}). Updated check time.`);
 				}
-				// Trigger UI update after status change
-				if (global.mainWindow) {
-					global.mainWindow.webContents.send('websites-updated');
-				}
-
-			} else {
-				// Update last checked time even if status didn't change
-				await db.updateWebsiteCheckTime(site.id);
-				console.log(`No status change for ${site.url} (Still ${newStatus}).`);
+			} catch (siteError) {
+				log.error(`Error processing site ${site.url} (ID: ${site.id}) during check:`, siteError);
+				// Continue processing other sites
 			}
-		}
+		});
+
+		// Wait for all checks in the current batch to complete (or fail)
+		await Promise.allSettled(checkPromises);
+		log.info("All website checks for this cycle completed.");
 
 	} catch (error) {
-		console.error("Error during monitoring cycle:", error);
+		// Error fetching websites list or other unexpected issue in the main try block
+		log.error("Error during monitoring cycle setup or fetching websites:", error);
 	} finally {
-		console.log("--- Finished Monitor Cycle ---\n");
-		isMonitoringPaused = false; // Re-enable for next cycle
+		// --- Send ONE UI update signal AFTER the whole loop ---
+		if (databaseWasUpdated && global.mainWindow && !global.mainWindow.isDestroyed()) {
+			log.info("Database was updated this cycle. Sending 'websites-updated' signal to renderer.");
+			global.mainWindow.webContents.send('websites-updated');
+		} else if (!databaseWasUpdated) {
+			log.info("No website database updates in this cycle, no UI signal sent.");
+		} else if (!global.mainWindow || global.mainWindow.isDestroyed()) {
+			log.warn("Database was updated, but main window is not available to send signal.");
+		}
+
+		log.info("--- Finished Monitor Cycle ---");
+		isMonitoringPaused = false; // Re-enable for next cycle regardless of outcome
 	}
 }
 
+// --- Start/Stop Monitoring --- (No changes needed here)
 function startMonitoring() {
 	if (monitorIntervalId) {
-		console.log("Monitoring already running.");
+		log.warn("startMonitoring called, but monitoring is already running.");
 		return;
 	}
-	console.log(`Starting website monitoring loop every ${CHECK_INTERVAL_MS / 1000} seconds.`);
+	log.info(`Starting website monitoring loop. Interval: ${CHECK_INTERVAL_MS / 1000} seconds.`);
 	// Run once immediately, then set interval
-	monitorAllWebsites();
+	monitorAllWebsites(); // Perform initial check
 	monitorIntervalId = setInterval(monitorAllWebsites, CHECK_INTERVAL_MS);
 }
 
 function stopMonitoring() {
 	if (monitorIntervalId) {
-		console.log("Stopping website monitoring loop.");
+		log.info("Stopping website monitoring loop.");
 		clearInterval(monitorIntervalId);
 		monitorIntervalId = null;
+	} else {
+		log.info("stopMonitoring called, but monitoring was not running.");
 	}
 }
 
 module.exports = {
 	startMonitoring,
-	stopMonitoring,
-	checkWebsite // Expose for potential manual checks if needed
+	stopMonitoring
+	// No need to expose checkWebsite externally usually
 };
