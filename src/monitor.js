@@ -5,53 +5,113 @@ const log = require('electron-log'); // Use electron-log
 
 const CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
 let monitorIntervalId = null;
-let isMonitoringPaused = false; // To prevent overlapping runs
+let isMonitoringPaused = false;
 
-// --- Email Sending --- (No changes needed here)
+// --- Email Sending ---
 async function sendNotificationEmail(subject, body) {
-	log.info(`Attempting to send email: ${subject}`);
+	log.info(`Attempting to send email: ${subject}`); // Keep this primary log
 	try {
 		const adminEmail = await db.getSetting('adminEmail');
-		const adminPassword = await db.getSetting('adminPassword'); // **SECURITY WARNING**
+		const adminPassword = await db.getSetting('adminPassword');
 
 		if (!adminEmail || !adminPassword) {
 			log.warn('Admin email or password not configured. Cannot send notification.');
 			return;
 		}
 
-		// SMTP Configuration (Keep your existing settings)
+		// *** IMPORTANT: CONFIGURE YOUR SMTP DETAILS HERE ***
 		const transporter = nodemailer.createTransport({
-			host: 'smtp.example.com', // REPLACE with your SMTP host
-			port: 587,
-			secure: false,
+			host: 'smtp.gmail.com', // e.g., 'smtp.gmail.com' or 'smtp.office365.com'
+			port: 587,                // Common port for STARTTLS
+			secure: false,            // true for 465 (SSL), false for 587 (STARTTLS)
 			auth: {
 				user: adminEmail,
-				pass: adminPassword,
+				pass: adminPassword, // Use App Password if possible!
+			},
+			tls: {
+				// Use if your provider uses self-signed certs (less common, less secure)
+				// rejectUnauthorized: false
+			}
+		});
+		// **************************************************
+
+		const mailOptions = {
+			from: `"Website Monitor" <${adminEmail}>`,
+			to: adminEmail, // Sends to the configured admin email
+			subject: subject,
+			text: body,
+		};
+
+		// Verify connection configuration (optional but recommended for debug)
+		// await transporter.verify();
+		// log.info("SMTP Server connection verified.");
+
+		let info = await transporter.sendMail(mailOptions);
+		log.info("Notification email sent successfully: %s", info.messageId);
+
+	} catch (error) {
+		log.error("Error sending notification email:", error); // Log the detailed error
+		// Consider adding user feedback if email fails persistently
+	}
+}
+
+// *** NEW FUNCTION: Send Test Email ***
+async function sendTestEmail(testEmail, testPassword) {
+	log.info(`Attempting to send TEST email to: ${testEmail}`);
+	if (!testEmail || !testPassword) {
+		log.error("Test email failed: Email or Password missing.");
+		throw new Error("Email address and Password are required to send a test email.");
+	}
+
+	try {
+		// *** IMPORTANT: Use the SAME SMTP CONFIGURATION as sendNotificationEmail ***
+		// Consider refactoring this config into a shared function/object if it gets complex
+		const transporter = nodemailer.createTransport({
+			host: 'smtp.gmail.com', // e.g., 'smtp.gmail.com' or 'smtp.office365.com'
+			port: 587,                // Common port for STARTTLS
+			secure: false,            // true for 465 (SSL), false for 587 (STARTTLS)
+			auth: {
+				user: testEmail,      // Use the provided test email
+				pass: testPassword,   // Use the provided test password (App Password!)
 			},
 			tls: {
 				// rejectUnauthorized: false
 			}
 		});
+		// ************************************************************************
 
 		const mailOptions = {
-			from: `"Website Monitor" <${adminEmail}>`,
-			to: adminEmail,
-			subject: subject,
-			text: body,
+			from: `"Website Monitor Test" <${testEmail}>`, // Sender address (using test email)
+			to: testEmail, // Send the test email TO the admin email itself
+			subject: "Website Monitor - Test Email", // Subject line
+			text: "This is a test email from the Website Monitor application.\n\nIf you received this, your email settings appear to be configured correctly.", // plain text body
 		};
 
+		// Optional: Verify connection before sending (good for immediate feedback)
+		// await transporter.verify();
+		// log.info("SMTP Connection verified for test email.");
+
 		let info = await transporter.sendMail(mailOptions);
-		log.info("Notification email sent: %s", info.messageId);
+		log.info("Test email sent successfully: %s", info.messageId);
+		return { success: true, message: `Test email sent successfully to ${testEmail}.` };
 
 	} catch (error) {
-		log.error("Error sending notification email:", error);
+		log.error("Error sending test email:", error);
+		// Provide a more helpful error message if possible
+		let errorMessage = error.message;
+		if (error.code === 'EAUTH') {
+			errorMessage = "Authentication failed. Check email/password (use App Password if applicable).";
+		} else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+			errorMessage = "Connection failed. Check SMTP host/port and firewall settings.";
+		}
+		throw new Error(`Failed to send test email: ${errorMessage}`); // Re-throw cleaned error
 	}
 }
 
-// --- Website Checking --- (No changes needed here)
+// --- Website Checking ---
 async function checkWebsite(website) {
 	const url = website.url;
-	log.debug(`Checking ${url}...`); // Use debug for frequent messages
+	log.debug(`Checking ${url}...`);
 	let isUp = false;
 	let errorMsg = null;
 	let checkUrl = url;
@@ -65,6 +125,9 @@ async function checkWebsite(website) {
 			timeout: 10000,
 			validateStatus: (status) => status >= 200 && status < 400,
 			maxRedirects: 5,
+			headers: { // Add a basic user-agent
+				'User-Agent': 'WebsiteMonitorElectronApp/1.0'
+			}
 		});
 		isUp = true;
 		log.debug(`${url} is UP (Status: ${response.status})`);
@@ -74,17 +137,17 @@ async function checkWebsite(website) {
 		if (error.response) {
 			errorMsg = `Status ${error.response.status}`;
 		} else if (error.request) {
-			errorMsg = `No response received`;
+			errorMsg = `No response received (Timeout or network issue)`;
 		} else {
 			errorMsg = `Request setup error: ${error.message}`;
 		}
-		log.warn(`${url} appears DOWN (${errorMsg || 'Check failed'})`); // Use warn for actual issues
+		log.warn(`${url} appears DOWN (${errorMsg || 'Check failed'})`);
 	}
 
 	return { isUp, errorMsg };
 }
 
-// --- Monitoring Loop --- ( *** KEY CHANGES HERE *** )
+// --- Monitoring Loop ---
 async function monitorAllWebsites() {
 	if (isMonitoringPaused) {
 		log.debug("Monitoring is paused, skipping check cycle.");
@@ -92,20 +155,17 @@ async function monitorAllWebsites() {
 	}
 
 	log.info("--- Starting Monitor Cycle ---");
-	isMonitoringPaused = true; // Pause to prevent overlap
-	let databaseWasUpdated = false; // <-- Flag to track if *any* DB write occurred
+	isMonitoringPaused = true;
+	let databaseWasUpdated = false; // Track if any DB write occurred
 
 	try {
 		const websites = await db.getAllWebsites();
 		if (!websites || websites.length === 0) {
 			log.info("No websites configured to monitor.");
-			// Ensure monitoring is unpaused even if no websites
 			isMonitoringPaused = false;
 			return;
 		}
 
-		// Use Promise.allSettled to check websites somewhat concurrently
-		// and handle individual check failures gracefully.
 		const checkPromises = websites.map(async (site) => {
 			try {
 				const { isUp, errorMsg } = await checkWebsite(site);
@@ -114,41 +174,43 @@ async function monitorAllWebsites() {
 
 				if (newStatus !== oldStatus) {
 					log.info(`Status change for ${site.url}: ${oldStatus} -> ${newStatus}`);
-					// Update DB first
-					await db.updateWebsiteStatus(site.id, newStatus);
-					databaseWasUpdated = true; // Mark that DB was written to
+					databaseWasUpdated = true;
 
-					// Send notifications only on transitions
-					if (newStatus === 'DOWN' && oldStatus !== 'DOWN') {
-						const subject = `ALERT: Website Down - ${site.url}`;
-						const body = `The website ${site.url} appears to be DOWN.\nReason: ${errorMsg || 'Failed check'}\nTimestamp: ${new Date().toISOString()}`;
-						await sendNotificationEmail(subject, body); // Intentionally awaited
-					} else if (newStatus === 'UP' && oldStatus === 'DOWN') {
-						const subject = `RESOLVED: Website Up - ${site.url}`;
-						const body = `The website ${site.url} is back UP.\nTimestamp: ${new Date().toISOString()}`;
-						await sendNotificationEmail(subject, body); // Intentionally awaited
+					if (newStatus === 'DOWN') {
+						await db.recordWebsiteDown(site.id); // Use new function
+						if (oldStatus !== 'DOWN') { // Only notify on transition into DOWN
+							log.info(`--> Calling sendNotificationEmail for DOWN event: ${site.url}`); // Confirm call
+							const subject = `ALERT: Website Down - ${site.url}`;
+							const body = `The website ${site.url} appears to be DOWN.\nReason: ${errorMsg || 'Failed check'}\nTimestamp: ${new Date().toISOString()}`;
+							await sendNotificationEmail(subject, body); // Intentionally await
+						}
+					} else { // newStatus must be 'UP'
+						await db.recordWebsiteUp(site.id); // Use new function
+						if (oldStatus === 'DOWN') { // Only notify on transition out of DOWN
+							log.info(`--> Calling sendNotificationEmail for UP event: ${site.url}`); // Confirm call
+							const subject = `RESOLVED: Website Up - ${site.url}`;
+							const body = `The website ${site.url} is back UP.\nTimestamp: ${new Date().toISOString()}`;
+							await sendNotificationEmail(subject, body); // Intentionally await
+						}
 					}
 				} else {
 					// Status is the same, just update the last checked time
 					await db.updateWebsiteCheckTime(site.id);
-					databaseWasUpdated = true; // Mark that DB was written to
+					databaseWasUpdated = true;
 					log.debug(`No status change for ${site.url} (Still ${newStatus}). Updated check time.`);
 				}
 			} catch (siteError) {
 				log.error(`Error processing site ${site.url} (ID: ${site.id}) during check:`, siteError);
-				// Continue processing other sites
 			}
 		});
 
-		// Wait for all checks in the current batch to complete (or fail)
 		await Promise.allSettled(checkPromises);
 		log.info("All website checks for this cycle completed.");
 
 	} catch (error) {
-		// Error fetching websites list or other unexpected issue in the main try block
 		log.error("Error during monitoring cycle setup or fetching websites:", error);
 	} finally {
-		// --- Send ONE UI update signal AFTER the whole loop ---
+		// Send ONE UI update signal AFTER the whole loop IF DB was updated
 		if (databaseWasUpdated && global.mainWindow && !global.mainWindow.isDestroyed()) {
 			log.info("Database was updated this cycle. Sending 'websites-updated' signal to renderer.");
 			global.mainWindow.webContents.send('websites-updated');
@@ -159,19 +221,18 @@ async function monitorAllWebsites() {
 		}
 
 		log.info("--- Finished Monitor Cycle ---");
-		isMonitoringPaused = false; // Re-enable for next cycle regardless of outcome
+		isMonitoringPaused = false; // Re-enable for next cycle
 	}
 }
 
-// --- Start/Stop Monitoring --- (No changes needed here)
+// --- Start/Stop Monitoring ---
 function startMonitoring() {
 	if (monitorIntervalId) {
 		log.warn("startMonitoring called, but monitoring is already running.");
 		return;
 	}
 	log.info(`Starting website monitoring loop. Interval: ${CHECK_INTERVAL_MS / 1000} seconds.`);
-	// Run once immediately, then set interval
-	monitorAllWebsites(); // Perform initial check
+	monitorAllWebsites(); // Run once immediately
 	monitorIntervalId = setInterval(monitorAllWebsites, CHECK_INTERVAL_MS);
 }
 
@@ -187,6 +248,6 @@ function stopMonitoring() {
 
 module.exports = {
 	startMonitoring,
-	stopMonitoring
-	// No need to expose checkWebsite externally usually
+	stopMonitoring,
+	sendTestEmail
 };

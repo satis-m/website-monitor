@@ -16,6 +16,7 @@
 	<body>
 		<h1>Application Settings</h1>
 
+		<!-- Area for messages (success/error for save AND test) -->
 		<div id="settings-message-area"></div>
 
 		<div class="settings-form">
@@ -44,7 +45,12 @@
 			<label for="admin-password">Admin Password / App Password:</label>
 			<input type="password" id="admin-password" />
 
-			<button id="save-settings-button">Save Settings</button>
+			<!-- Buttons side-by-side -->
+			<div style="margin-top: 15px">
+				<button id="save-settings-button">Save Settings</button>
+				<button id="test-email-button">Send Test Email</button>
+				<!-- ADDED Button -->
+			</div>
 		</div>
 
 		<script src="settings_renderer.js"></script>

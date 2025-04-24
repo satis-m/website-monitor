@@ -1,9 +1,12 @@
+// preload.js
+
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
 	// Settings
 	getSettings: () => ipcRenderer.invoke('get-settings'),
 	saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+	sendTestEmail: (credentials) => ipcRenderer.invoke('send-test-email', credentials), // Channel exists
 
 	// Websites
 	getWebsites: () => ipcRenderer.invoke('get-websites'),

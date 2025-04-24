@@ -4,29 +4,22 @@ const path = require('path');
 const fs = require('fs');
 const log = require('electron-log'); // <-- Use electron-log
 
-// --- Determine the correct user data path ---
-// This path is reliable in both development and packaged states.
-// It points to a writable location specific to your app for the current user.
-// Example: C:\Users\YourUser\AppData\Roaming\YourAppName
+// Determine the correct user data path
 const userDataPath = app.getPath('userData');
-
-// Store the database within a 'data' subfolder inside the userData path
 const dbDir = path.join(userDataPath, 'data');
 const dbPath = path.join(dbDir, 'monitor_db.sqlite');
 
 let db;
 
-// --- Function to Ensure Data Directory Exists ---
-// This MUST be called from main.js *after* app is ready, *before* initDb
+// Function to Ensure Data Directory Exists
 function ensureDataDirExists() {
 	log.info(`Ensuring database directory exists at: ${dbDir}`);
 	if (!fs.existsSync(dbDir)) {
 		try {
-			fs.mkdirSync(dbDir, { recursive: true }); // Ensure parent dirs are created too
+			fs.mkdirSync(dbDir, { recursive: true });
 			log.info(`Created database directory: ${dbDir}`);
 		} catch (err) {
 			log.error(`Fatal: Error creating database directory ${dbDir}:`, err);
-			// Re-throw the error to be caught by the main process startup handler
 			throw new Error(`Failed to create database directory: ${err.message}`);
 		}
 	} else {
@@ -34,57 +27,48 @@ function ensureDataDirExists() {
 	}
 }
 
-// --- Initialize Database ---
+// Initialize Database
 function initDb() {
 	return new Promise((resolve, reject) => {
-		// The check/creation of dbDir should happen *before* this in main.js
 		log.info(`Attempting to connect/create DB at: ${dbPath}`);
-
-		// Explicitly use flags to allow creation if it doesn't exist
 		db = new sqlite3.Database(dbPath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
 			if (err) {
 				log.error(`Error opening/creating database at ${dbPath}:`, err.message);
-				return reject(err); // Reject the promise on error
+				return reject(err);
 			}
 			log.info(`Successfully connected to the SQLite database: ${dbPath}`);
 
-			// Create tables if they don't exist
 			db.serialize(() => {
-				// Use Promise.all to wait for both table creations
 				Promise.all([
 					new Promise((resolveTable, rejectTable) => {
 						db.run(`CREATE TABLE IF NOT EXISTS settings (
                             key TEXT PRIMARY KEY,
                             value TEXT
                         )`, (errTable) => {
-							if (errTable) {
-								log.error("DB Error creating 'settings' table:", errTable);
-								return rejectTable(errTable);
-							}
+							if (errTable) { log.error("DB Error creating 'settings' table:", errTable); return rejectTable(errTable); }
 							log.info("Checked/Created 'settings' table.");
 							resolveTable();
 						});
 					}),
 					new Promise((resolveTable, rejectTable) => {
+						// --- ADDED last_down_timestamp column ---
 						db.run(`CREATE TABLE IF NOT EXISTS websites (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             url TEXT NOT NULL UNIQUE,
-                            status TEXT DEFAULT 'UNKNOWN', -- 'UP', 'DOWN', 'UNKNOWN'
+                            status TEXT DEFAULT 'UNKNOWN',
                             last_checked INTEGER,
-                            last_status_change INTEGER
+                            last_status_change INTEGER,
+                            last_down_timestamp INTEGER DEFAULT NULL  -- <-- ADDED
                         )`, (errTable) => {
-							if (errTable) {
-								log.error("DB Error creating 'websites' table:", errTable);
-								return rejectTable(errTable);
-							}
+							if (errTable) { log.error("DB Error creating 'websites' table:", errTable); return rejectTable(errTable); }
 							log.info("Checked/Created 'websites' table.");
 							resolveTable();
 						});
 					})
 				]).then(() => {
 					log.info("Database tables checked/created successfully.");
-					resolve(); // Resolve the main initDb promise
-				}).catch(reject); // If any table creation fails, reject initDb
+					resolve();
+				}).catch(reject);
 			});
 		});
 	});
@@ -95,10 +79,7 @@ function getSetting(key) {
 	return new Promise((resolve, reject) => {
 		if (!db) return reject(new Error("Database not initialized"));
 		db.get('SELECT value FROM settings WHERE key = ?', [key], (err, row) => {
-			if (err) {
-				log.warn(`Error getting setting '${key}':`, err);
-				return reject(err);
-			}
+			if (err) { log.warn(`Error getting setting '${key}':`, err); return reject(err); }
 			resolve(row ? row.value : null);
 		});
 	});
@@ -108,17 +89,47 @@ function saveSetting(key, value) {
 	return new Promise((resolve, reject) => {
 		if (!db) return reject(new Error("Database not initialized"));
 		db.run('REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value], function (err) {
-			if (err) {
-				log.error(`Error saving setting '${key}':`, err);
-				return reject(err);
-			}
+			if (err) { log.error(`Error saving setting '${key}':`, err); return reject(err); }
 			log.info(`Setting saved: ${key}`);
 			resolve();
 		});
 	});
 }
 
-// --- Websites --- (Assuming these functions remain largely the same, adding logging)
+// --- Websites ---
+
+// ADDED: Call this ONLY when transitioning TO 'DOWN' state
+function recordWebsiteDown(id) {
+	return new Promise((resolve, reject) => {
+		if (!db) return reject(new Error("Database not initialized"));
+		const now = Date.now();
+		// Update status, checked time, status change time, AND last down time
+		db.run('UPDATE websites SET status = ?, last_checked = ?, last_status_change = ?, last_down_timestamp = ? WHERE id = ?',
+			['DOWN', now, now, now, id], // Set last_down_timestamp to now
+			function (err) {
+				if (err) { log.error(`Error recording DOWN status for website ID ${id}:`, err); return reject(err); }
+				log.info(`Website status recorded as DOWN: ID ${id}`);
+				resolve();
+			});
+	});
+}
+
+// ADDED: Call this ONLY when transitioning FROM 'DOWN' TO 'UP' state
+function recordWebsiteUp(id) {
+	return new Promise((resolve, reject) => {
+		if (!db) return reject(new Error("Database not initialized"));
+		const now = Date.now();
+		// Update status, checked time, status change time. DO NOT touch last_down_timestamp here.
+		db.run('UPDATE websites SET status = ?, last_checked = ?, last_status_change = ? WHERE id = ?',
+			['UP', now, now, id],
+			function (err) {
+				if (err) { log.error(`Error recording UP status for website ID ${id}:`, err); return reject(err); }
+				log.info(`Website status recorded as UP: ID ${id}`);
+				resolve();
+			});
+	});
+}
+
 function getAllWebsites() {
 	return new Promise((resolve, reject) => {
 		if (!db) return reject(new Error("Database not initialized"));
@@ -130,13 +141,14 @@ function getAllWebsites() {
 }
 
 function addWebsite(url) {
+	// Add website with default NULL for last_down_timestamp
 	return new Promise((resolve, reject) => {
 		if (!db) return reject(new Error("Database not initialized"));
-		const stmt = db.prepare('INSERT INTO websites (url, status, last_status_change) VALUES (?, ?, ?)');
-		stmt.run([url, 'UNKNOWN', Date.now()], function (err) {
+		const stmt = db.prepare('INSERT INTO websites (url, status, last_status_change, last_down_timestamp) VALUES (?, ?, ?, ?)');
+		stmt.run([url, 'UNKNOWN', Date.now(), null], function (err) {
 			stmt.finalize();
 			if (err) {
-				log.warn(`Error adding website '${url}':`, err.message); // Use warn for constraints
+				log.warn(`Error adding website '${url}':`, err.message);
 				if (err.code === 'SQLITE_CONSTRAINT') {
 					return reject(new Error(`URL already exists: ${url}`));
 				}
@@ -160,20 +172,7 @@ function deleteWebsite(id) {
 	});
 }
 
-function updateWebsiteStatus(id, status) {
-	return new Promise((resolve, reject) => {
-		if (!db) return reject(new Error("Database not initialized"));
-		const now = Date.now();
-		db.run('UPDATE websites SET status = ?, last_checked = ?, last_status_change = ? WHERE id = ?',
-			[status, now, now, id],
-			function (err) {
-				if (err) { log.error(`Error updating status for website ID ${id}:`, err); return reject(err); }
-				// log.info(`Website status updated: ID ${id} -> ${status}`); // Can be noisy, log elsewhere if needed
-				resolve();
-			});
-	});
-}
-
+// Only updates check time when status hasn't changed
 function updateWebsiteCheckTime(id) {
 	return new Promise((resolve, reject) => {
 		if (!db) return reject(new Error("Database not initialized"));
@@ -187,41 +186,26 @@ function updateWebsiteCheckTime(id) {
 	});
 }
 
-
-function getWebsiteById(id) {
-	return new Promise((resolve, reject) => {
-		if (!db) return reject(new Error("Database not initialized"));
-		db.get('SELECT * FROM websites WHERE id = ?', [id], (err, row) => {
-			if (err) { log.error(`Error getting website by ID ${id}:`, err); return reject(err); }
-			resolve(row);
-		});
-	});
-}
-
-
 // --- Close Database ---
 function closeDb() {
 	return new Promise((resolve, reject) => {
 		if (db) {
 			log.info("Closing database connection...");
 			db.close((err) => {
-				if (err) {
-					log.error('Error closing database:', err.message);
-					return reject(err);
-				}
+				if (err) { log.error('Error closing database:', err.message); return reject(err); }
 				log.info('Database connection closed.');
-				db = null; // Clear reference
+				db = null;
 				resolve();
 			});
 		} else {
 			log.info('Database already closed or never opened.');
-			resolve(); // Already closed or never opened
+			resolve();
 		}
 	});
 }
 
 module.exports = {
-	ensureDataDirExists, // <-- Export the new function
+	ensureDataDirExists,
 	initDb,
 	closeDb,
 	getSetting,
@@ -229,8 +213,8 @@ module.exports = {
 	getAllWebsites,
 	addWebsite,
 	deleteWebsite,
-	updateWebsiteStatus,
-	updateWebsiteCheckTime,
-	getWebsiteById,
-	dbPath // <-- Export dbPath for logging/debugging info
+	updateWebsiteCheckTime, // Keep this
+	recordWebsiteDown,      // Export new
+	recordWebsiteUp,        // Export new
+	dbPath
 };
