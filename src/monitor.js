@@ -4,8 +4,36 @@ const db = require('./database');
 const log = require('electron-log'); // Use electron-log
 
 const CHECK_INTERVAL_MS = 60 * 1000; // 1 minute
+const NETWORK_CHECK_TIMEOUT_MS = 5000; // 5 seconds for connectivity check
+const NETWORK_CHECK_URL = 'http://connectivitycheck.gstatic.com/generate_204'; // Google's lightweight check URL
+
 let monitorIntervalId = null;
 let isMonitoringPaused = false;
+
+
+// *** NEW FUNCTION: Check Internet Connectivity ***
+async function isNetworkAvailable() {
+	log.debug(`Checking network connectivity via HEAD request to ${NETWORK_CHECK_URL}`);
+	try {
+		// Use HEAD request for minimal data transfer
+		await axios.head(NETWORK_CHECK_URL, { timeout: NETWORK_CHECK_TIMEOUT_MS });
+		log.info("Network connectivity check successful.");
+		return true; // Request succeeded, network is likely available
+	} catch (error) {
+		// Log specific errors if available, otherwise generic message
+		const errorCode = error.code || 'Unknown';
+		const errorMessage = error.message || 'No error message';
+		log.warn(`Network connectivity check failed. Code: ${errorCode}, Message: ${errorMessage}`);
+		if (error.code === 'ENOTFOUND') {
+			log.warn("-> Suggests DNS resolution issue or no network connection.");
+		} else if (error.code === 'ETIMEDOUT' || error.message.includes('timeout')) {
+			log.warn("-> Suggests connection timed out, possibly slow or blocked network.");
+		} else if (error.code === 'ECONNREFUSED') {
+			log.warn("-> Suggests connection refused by the server (less likely for Google).");
+		}
+		return false; // Request failed, network is likely unavailable
+	}
+}
 
 // --- Email Sending ---
 async function sendNotificationEmail(subject, body) {
@@ -156,56 +184,70 @@ async function monitorAllWebsites() {
 
 	log.info("--- Starting Monitor Cycle ---");
 	isMonitoringPaused = true;
+
+
+	// *** PERFORM INTERNET CONNECTIVITY CHECK FIRST ***
+	const networkUp = await isNetworkAvailable();
+	if (!networkUp) {
+		log.warn("Network connection check failed. Skipping website monitoring for this cycle.");
+		isMonitoringPaused = false; // Unpause to allow next cycle attempt
+		log.info("--- Finished Monitor Cycle (Skipped due to network unavailability) ---");
+		return; // Exit the function early
+	}
+	// *** END OF INTERNET CHECK ***
+
 	let databaseWasUpdated = false; // Track if any DB write occurred
 
 	try {
 		const websites = await db.getAllWebsites();
 		if (!websites || websites.length === 0) {
 			log.info("No websites configured to monitor.");
-			isMonitoringPaused = false;
-			return;
+			// isMonitoringPaused = false;
+			// return;
+		} else {
+
+			const checkPromises = websites.map(async (site) => {
+				try {
+					const { isUp, errorMsg } = await checkWebsite(site);
+					const newStatus = isUp ? 'UP' : 'DOWN';
+					const oldStatus = site.status;
+
+					if (newStatus !== oldStatus) {
+						log.info(`Status change for ${site.url}: ${oldStatus} -> ${newStatus}`);
+						databaseWasUpdated = true;
+
+						if (newStatus === 'DOWN') {
+							await db.recordWebsiteDown(site.id); // Use new function
+							if (oldStatus !== 'DOWN') { // Only notify on transition into DOWN
+								log.info(`--> Calling sendNotificationEmail for DOWN event: ${site.url}`); // Confirm call
+								const subject = `ALERT: Website Down - ${site.url}`;
+								const body = `The website ${site.url} appears to be DOWN.\nReason: ${errorMsg || 'Failed check'}\nTimestamp: ${new Date().toISOString()}`;
+								await sendNotificationEmail(subject, body); // Intentionally await
+							}
+						} else { // newStatus must be 'UP'
+							await db.recordWebsiteUp(site.id); // Use new function
+							if (oldStatus === 'DOWN') { // Only notify on transition out of DOWN
+								log.info(`--> Calling sendNotificationEmail for UP event: ${site.url}`); // Confirm call
+								const subject = `RESOLVED: Website Up - ${site.url}`;
+								const body = `The website ${site.url} is back UP.\nTimestamp: ${new Date().toISOString()}`;
+								await sendNotificationEmail(subject, body); // Intentionally await
+							}
+						}
+					} else {
+						// Status is the same, just update the last checked time
+						await db.updateWebsiteCheckTime(site.id);
+						databaseWasUpdated = true;
+						log.debug(`No status change for ${site.url} (Still ${newStatus}). Updated check time.`);
+					}
+				} catch (siteError) {
+					log.error(`Error processing site ${site.url} (ID: ${site.id}) during check:`, siteError);
+				}
+			});
+
+			await Promise.allSettled(checkPromises);
+			log.info("All website checks for this cycle completed.");
 		}
 
-		const checkPromises = websites.map(async (site) => {
-			try {
-				const { isUp, errorMsg } = await checkWebsite(site);
-				const newStatus = isUp ? 'UP' : 'DOWN';
-				const oldStatus = site.status;
-
-				if (newStatus !== oldStatus) {
-					log.info(`Status change for ${site.url}: ${oldStatus} -> ${newStatus}`);
-					databaseWasUpdated = true;
-
-					if (newStatus === 'DOWN') {
-						await db.recordWebsiteDown(site.id); // Use new function
-						if (oldStatus !== 'DOWN') { // Only notify on transition into DOWN
-							log.info(`--> Calling sendNotificationEmail for DOWN event: ${site.url}`); // Confirm call
-							const subject = `ALERT: Website Down - ${site.url}`;
-							const body = `The website ${site.url} appears to be DOWN.\nReason: ${errorMsg || 'Failed check'}\nTimestamp: ${new Date().toISOString()}`;
-							await sendNotificationEmail(subject, body); // Intentionally await
-						}
-					} else { // newStatus must be 'UP'
-						await db.recordWebsiteUp(site.id); // Use new function
-						if (oldStatus === 'DOWN') { // Only notify on transition out of DOWN
-							log.info(`--> Calling sendNotificationEmail for UP event: ${site.url}`); // Confirm call
-							const subject = `RESOLVED: Website Up - ${site.url}`;
-							const body = `The website ${site.url} is back UP.\nTimestamp: ${new Date().toISOString()}`;
-							await sendNotificationEmail(subject, body); // Intentionally await
-						}
-					}
-				} else {
-					// Status is the same, just update the last checked time
-					await db.updateWebsiteCheckTime(site.id);
-					databaseWasUpdated = true;
-					log.debug(`No status change for ${site.url} (Still ${newStatus}). Updated check time.`);
-				}
-			} catch (siteError) {
-				log.error(`Error processing site ${site.url} (ID: ${site.id}) during check:`, siteError);
-			}
-		});
-
-		await Promise.allSettled(checkPromises);
-		log.info("All website checks for this cycle completed.");
 
 	} catch (error) {
 		log.error("Error during monitoring cycle setup or fetching websites:", error);
